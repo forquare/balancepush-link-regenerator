@@ -1,95 +1,63 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
+	gocardless "github.com/forquare/balancepush-gocardless"
 	"github.com/forquare/balancepush/config"
-	"github.com/forquare/balancepush/gocardless"
-	"log"
+	"github.com/gin-gonic/gin"
+	"github.com/sirupsen/logrus"
 	"net/http"
-	"os/exec"
-	"runtime"
-	"time"
-)
-
-const (
-	redirectPort = ":3000"
+	"strconv"
 )
 
 func main() {
+	logrus.SetLevel(logrus.DebugLevel)
+	c := config.GetConfig()
+	//gin.SetMode(gin.ReleaseMode)
+	router := gin.Default()
+
+	router.Use(gin.Recovery())
+
+	router.GET("/ping", func(c *gin.Context) {
+		c.JSON(200, gin.H{
+			"message": "pong",
+		})
+	})
+
+	router.LoadHTMLFiles("templates/error.tmpl", "templates/redirect.tmpl")
+
+	router.GET("/", requisitionHandler)
+	router.GET("/redirect", redirectHandler)
+
+	err := router.Run(fmt.Sprintf("%s:%d", c.Requisitioner.Listen.Host, c.Requisitioner.Listen.Port))
+	if err != nil {
+		logrus.Println(err)
+	}
+}
+
+func requisitionHandler(gc *gin.Context) {
 	c := config.GetConfig()
 
 	client, err := gocardless.NewGoCardlessClient(c.GoCardless.Credentials.SecretID, c.GoCardless.Credentials.SecretKey)
 	if err != nil {
-		log.Fatalf("Error creating client: %v", err)
+		logrus.Fatalf("Error creating client: %v", err)
 	}
 
-	// This is needed to get the account details, but I think once we have them
-	// it is no longer needed for 180 days...
+	// This is needed to get the account details, but once we have them it's good for 90 days
 	agreementID, err := client.GetAgreement(c.GoCardless.Bank.Institution)
 	if err != nil {
-		log.Fatalf("Error creating agreement: %v", err)
+		logrus.New().Fatalf("Error creating agreement: %v", err)
 	}
 
-	req, err := client.CreateRequisition(c.GoCardless.Bank.Institution, agreementID)
+	req, err := client.CreateRequisition(c.GoCardless.Bank.Institution, agreementID, c.Requisitioner.Redirect.Proto, c.Requisitioner.Redirect.Host, strconv.Itoa(c.Requisitioner.Redirect.Port), c.Requisitioner.Redirect.Path)
+
 	if err != nil {
-		log.Fatalf("Error creating requisition: %v", err)
+		logrus.Fatalf("Error creating requisition: %v", err)
 	}
 
-	var requisition gocardless.Requisition
-	go openBrowser(req.Link)
-
-	ch := make(chan bool, 1)
-
-	go catchRedirect(redirectPort, ch)
-
-	<-ch
-
-	for req.Status == "CR" {
-		req, err = client.GetRequisition(req.ID)
-		time.Sleep(5 * time.Second)
-		if err != nil {
-			log.Fatalf("Error getting requisition: %v", err)
-		} else {
-			requisition = req
-		}
-	}
-
-	jsonPretty, err := json.MarshalIndent(requisition, "", "  ")
-	fmt.Println("Institution Details:", string(jsonPretty))
-
-	return
-}
-func openBrowser(url string) {
-	var err error
-
-	switch runtime.GOOS {
-	case "linux":
-		err = exec.Command("xdg-open", url).Start()
-	case "windows":
-		err = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
-	case "darwin":
-		err = exec.Command("open", url).Start()
-	default:
-		err = fmt.Errorf("unsupported platform")
-	}
-	if err != nil {
-		log.Fatal(err)
-	}
+	gc.Redirect(303, req.Link)
 }
 
-func catchRedirect(port string, ch chan bool) {
-	handler := func(chan bool) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ch <- true
-			w.Write([]byte("You can close this window now"))
-		})
-	}
-	http.Handle("/", handler(ch))
-
-	err := http.ListenAndServe(port, nil)
-
-	if err != nil {
-		panic(err)
-	}
+func redirectHandler(gc *gin.Context) {
+	gc.HTML(http.StatusOK, "redirect.tmpl", gin.H{})
 }

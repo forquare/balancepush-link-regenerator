@@ -26,3 +26,5 @@ go.work.sum
 
 # Credentials
 balancepush.yaml
+dist
+main
